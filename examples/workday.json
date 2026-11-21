@@ -1,0 +1,27 @@
+{
+  "shift": "S1",
+  "revisions": [
+    {"id": "R1", "channels": ["A", "B", "C"], "ratios": {"A": 2, "B": 1, "C": 1}},
+    {"id": "R2", "channels": ["A", "B", "C"], "ratios": {"A": 5, "B": 1, "C": 1}}
+  ],
+  "events": [
+    {"action": "trigger", "args": ["S1", "A", "M1"]},
+    {"action": "trigger", "args": ["S1", "A", "M2"]},
+    {"action": "trigger", "args": ["S1", "B", "M3"]},
+    {"action": "return", "args": ["S1", "M2", 11]},
+    {"action": "stop", "args": ["S1"]},
+    {"action": "readout", "args": ["S1"]},
+    {"action": "return", "args": ["S1", "M3", 0]},
+    {"action": "readout", "args": ["S1"]},
+    {"action": "return", "args": ["S1", "M1", 7]},
+    {"action": "readout", "args": ["S1"]}
+  ],
+  "expected_capture": {"stop_sequence": 3, "pending": [["M1", "M3"], ["M1"]]},
+  "expected_report": {
+    "revision": "R1",
+    "channels": [["A", 36], ["B", 0], ["C", 0]],
+    "pieces": 36,
+    "details": [["M1", "A", 1, 7, 14], ["M2", "A", 2, 11, 22], ["M3", "B", 3, 0, 0]]
+  },
+  "expected_originals": [["M1", "A", 1, 7], ["M2", "A", 2, 11], ["M3", "B", 3, 0]]
+}
