@@ -3,6 +3,10 @@ from contextlib import closing
 from pathlib import Path
 from threading import RLock
 
+from clear.archive import initialize_clear_schema
+from clear.contract import ClearDelivery, ClearReport
+from clear.intake import receive_clear, retrieve_clear
+from clear.source import ClearBook, accept_clear
 from device.returns import RawOriginal, accept_return
 from device.session import DeviceSession, start_session
 from device.trigger import accept_trigger
@@ -34,6 +38,7 @@ class Station:
             initialize_intake_schema,
             initialize_receipt_schema,
             initialize_report_schema,
+            initialize_clear_schema,
         ))
 
     def rule(self, revision_id: str, channels: Sequence[str], ratios: Mapping[str, int]) -> RuleRevision:
@@ -69,6 +74,13 @@ class Station:
     def retrieve(self, report_id: str) -> SignedReport | None:
         return retrieve_report(self.path, report_id)
 
+    def receive_clear(self, shift_id: str, delivery: ClearDelivery):
+        with closing(open_store(self.path)) as connection:
+            return receive_clear(connection, shift_id, delivery, self._before_commit)
+
+    def retrieve_clear(self, shift_id: str, clear_id: str) -> ClearReport | None:
+        return retrieve_clear(self.path, shift_id, clear_id)
+
 
 class Source:
     def __init__(self, station: Station):
@@ -77,6 +89,7 @@ class Source:
         self._stops = StopBook()
         self._readouts = ReadoutBook()
         self._custody = CustodyBook()
+        self._clears = ClearBook()
         self._lock = RLock()
         self._closed = False
 
@@ -124,6 +137,15 @@ class Source:
         with self._lock:
             return read_whole_machine(self._session(shift_id), self._stops, self._readouts, self._custody)
 
+    def clear(self, shift_id: str, clear_id: str, channels: Sequence[str]):
+        with self._lock:
+            session = self._session(shift_id)
+            with closing(open_store(self._station_path, readonly=True)) as connection:
+                return accept_clear(
+                    session, ShiftRegistry(connection), self._clears,
+                    shift_id, clear_id, channels,
+                )
+
     def confirm(self, readout_id: str, receipt: CustodyReceipt) -> CustodyRecord:
         with self._lock:
             self._require_connected()
@@ -143,3 +165,4 @@ class Source:
             self._stops = StopBook()
             self._readouts = ReadoutBook()
             self._custody = CustodyBook()
+            self._clears = ClearBook()

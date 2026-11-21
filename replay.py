@@ -3,6 +3,7 @@ import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from clear.contract import ClearPending, ClearReport
 from drain.readout import AwaitingReturns, WholeReadout
 from report.archive import SignedReport
 from station import Source, Station
@@ -120,10 +121,123 @@ def run_workday(database: Path, sample: dict) -> dict:
     }
 
 
+def load_channel_clear() -> dict:
+    sample = Path(__file__).resolve().parent / 'examples' / 'channel_clear.json'
+    return json.loads(sample.read_text(encoding='utf-8'))
+
+
+def _clear_report_values(report: ClearReport) -> dict:
+    return {
+        'status': report.status,
+        'cut_sequence': report.cut_sequence,
+        'channels': [[item.channel, item.pieces] for item in report.totals.channels],
+        'grand_total': report.totals.grand_total,
+        'originals': [[item.sequence, item.channel, item.measurement_id, item.raw_code]
+                      for item in report.originals],
+        'receipt_id': report.receipt_id,
+    }
+
+
+def _channels_of(sample: dict, clear_id: str):
+    for action, *args in sample['events']:
+        if action == 'clear' and args[0] == clear_id:
+            return args[1]
+    raise KeyError(clear_id)
+
+
+def run_channel_clear(
+    database: Path, sample: dict, *, close_source: bool = False, stop_after: bool = False
+) -> dict:
+    station = Station(database)
+    source = Source(station)
+    shift_id = sample['shift_id']
+    revision_id = sample['revision_id']
+    station.rule(revision_id, sample['channels'], sample['ratios'])
+    source.open(shift_id, revision_id)
+
+    cut_sequences = {}
+    checkpoint = {}
+    for action, *args in sample['events']:
+        if action == 'trigger':
+            source.trigger(shift_id, *args)
+        elif action == 'return':
+            source.return_raw(shift_id, *args)
+        elif action == 'clear':
+            clear_id, channels = args
+            delivery = source.clear(shift_id, clear_id, channels)
+            cut_sequences[clear_id] = delivery.cut_sequence
+        elif action == 'checkpoint':
+            source.stop(shift_id)
+            for clear_id, expected in sample['expected']['checkpoint'].items():
+                result = station.receive_clear(
+                    shift_id, source.clear(shift_id, clear_id, _channels_of(sample, clear_id))
+                )
+                checkpoint[clear_id] = result.status
+                assert result.status == expected, (clear_id, result.status, expected)
+        else:
+            raise ValueError(f'unknown fixture event {action!r}')
+
+    # Q2 already signed at the checkpoint; the late b7 return now completes Q1.
+    q1_result = station.receive_clear(
+        shift_id, source.clear(shift_id, 'Q1', _channels_of(sample, 'Q1'))
+    )
+    q2_result = station.retrieve_clear(shift_id, 'Q2')
+    assert isinstance(q1_result, ClearReport) and isinstance(q2_result, ClearReport)
+
+    for clear_id, report in (('Q1', q1_result), ('Q2', q2_result)):
+        expected = sample['expected'][clear_id]
+        assert report.cut_sequence == expected['cut_sequence']
+        assert [[item.channel, item.pieces] for item in report.totals.channels] == expected['channels']
+        assert [[item.sequence, item.channel, item.measurement_id, item.raw_code]
+                for item in report.originals] == expected['originals']
+
+    evidence = {
+        'case_id': 'channel_clear',
+        'cut_sequences': cut_sequences,
+        'checkpoint': checkpoint,
+        'reports': {
+            'Q1': _clear_report_values(q1_result),
+            'Q2': _clear_report_values(q2_result),
+        },
+    }
+
+    if stop_after:
+        whole = source.readout(shift_id)
+        assert isinstance(whole, WholeReadout)
+        custody = station.receive(shift_id, whole)
+        source.confirm(whole.readout_id, custody)
+        whole_report = station.issue(shift_id)
+        evidence['whole_machine'] = {
+            'channels': [[item.channel, item.pieces] for item in whole_report.totals.channels],
+            'grand_total': whole_report.totals.grand_total,
+        }
+
+    if close_source:
+        source.close()
+        reopened = Station(database)
+        retrieved = {
+            clear_id: reopened.retrieve_clear(shift_id, clear_id)
+            for clear_id in ('Q1', 'Q2')
+        }
+        evidence['reopened'] = {
+            clear_id: report.receipt_id
+            for clear_id, report in retrieved.items()
+        }
+        assert retrieved['Q1'] == q1_result and retrieved['Q2'] == q2_result
+    return evidence
+
+
 def main() -> None:
     with TemporaryDirectory(prefix='packline-demo-') as directory:
-        evidence = run_workday(Path(directory) / 'station.sqlite', load_workday())
-    print('POINTWISE_SCENARIO ' + json.dumps(evidence, ensure_ascii=False, sort_keys=True))
+        workday = run_workday(Path(directory) / 'station.sqlite', load_workday())
+    print('POINTWISE_SCENARIO ' + json.dumps(workday, ensure_ascii=False, sort_keys=True))
+
+    with TemporaryDirectory(prefix='packline-clear-demo-') as directory:
+        clear_evidence = run_channel_clear(
+            Path(directory) / 'clear.sqlite', load_channel_clear(),
+            close_source=True, stop_after=True,
+        )
+    print('POINTWISE_CHANNEL_CLEAR ' + json.dumps(clear_evidence, ensure_ascii=False, sort_keys=True))
 
 
 if __name__ == '__main__':
